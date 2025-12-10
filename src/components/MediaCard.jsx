@@ -95,7 +95,7 @@ export default function MediaCard({ file }) {
       <div className="relative aspect-video bg-gray-200 overflow-hidden">
         {thumbnail ? (
           <img
-            src={`/${thumbnail}`}
+            src={`${import.meta.env.BASE_URL}${thumbnail}`}
             alt={file.fileName}
             className="w-full h-full object-cover"
             loading="lazy"
