@@ -354,8 +354,68 @@ def process_file(file_path: Path, relative_path: Path) -> Optional[Dict]:
     }
 
 
-def scan_volume(volume_path: str) -> List[Dict]:
-    """Scan volume for media files and process them."""
+def load_existing_index() -> Dict:
+    """Load existing media index if it exists."""
+    if OUTPUT_JSON.exists():
+        try:
+            with open(OUTPUT_JSON, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logging.info(f"Loaded existing index with {len(data.get('files', []))} files")
+                return data
+        except Exception as e:
+            logging.warning(f"Could not load existing index: {e}")
+    return {'files': [], 'metadata': {}}
+
+
+def build_file_tree(volume_path: str) -> Dict[str, Dict]:
+    """Build a tree of all current media files with their metadata."""
+    volume = Path(volume_path)
+    if not volume.exists():
+        raise FileNotFoundError(f"Volume not found: {volume_path}")
+
+    file_tree = {}
+    logging.info(f"Building file tree from {volume_path}...")
+
+    for file_path in volume.rglob('*'):
+        if file_path.is_file() and not should_skip_path(file_path):
+            if get_file_type(file_path):
+                relative_path = str(file_path.relative_to(volume))
+                file_id = hashlib.md5(relative_path.encode()).hexdigest()[:16]
+
+                file_tree[file_id] = {
+                    'path': file_path,
+                    'relativePath': relative_path,
+                    'mtime': file_path.stat().st_mtime,
+                    'size': file_path.stat().st_size
+                }
+
+    logging.info(f"Found {len(file_tree)} media files on disk")
+    return file_tree
+
+
+def delete_thumbnails(file_entry: Dict):
+    """Delete thumbnails associated with a file entry."""
+    try:
+        # Delete main thumbnail
+        if file_entry.get('thumbnails', {}).get('main'):
+            main_path = OUTPUT_DIR / "public" / file_entry['thumbnails']['main']
+            if main_path.exists():
+                main_path.unlink()
+                logging.debug(f"Deleted thumbnail: {main_path}")
+
+        # Delete frame thumbnails
+        for frame in file_entry.get('thumbnails', {}).get('frames', []):
+            frame_path = OUTPUT_DIR / "public" / frame
+            if frame_path.exists():
+                frame_path.unlink()
+                logging.debug(f"Deleted thumbnail: {frame_path}")
+
+    except Exception as e:
+        logging.warning(f"Error deleting thumbnails for {file_entry.get('fileName')}: {e}")
+
+
+def scan_volume_full(volume_path: str) -> List[Dict]:
+    """Scan volume for all media files (full scan, no incremental)."""
     volume = Path(volume_path)
     if not volume.exists():
         raise FileNotFoundError(f"Volume not found: {volume_path}")
@@ -364,7 +424,7 @@ def scan_volume(volume_path: str) -> List[Dict]:
     total_files = 0
     current_dir = None
 
-    logging.info(f"Starting scan of {volume_path}...")
+    logging.info(f"Starting full scan of {volume_path}...")
 
     for file_path in volume.rglob('*'):
         # Log directory changes
@@ -391,10 +451,93 @@ def scan_volume(volume_path: str) -> List[Dict]:
     return files
 
 
+def scan_volume_incremental(volume_path: str, allow_delete: bool = True) -> List[Dict]:
+    """Incrementally scan volume, only processing new or changed files."""
+    # Load existing index
+    existing_index = load_existing_index()
+    existing_files = {f['id']: f for f in existing_index.get('files', [])}
+
+    # Build current file tree
+    current_tree = build_file_tree(volume_path)
+
+    # Track what needs processing
+    files_to_process = []
+    files_to_keep = []
+    files_deleted = []
+
+    # Find new and changed files
+    for file_id, file_info in current_tree.items():
+        existing = existing_files.get(file_id)
+
+        if existing is None:
+            # New file
+            logging.info(f"NEW: {file_info['relativePath']}")
+            files_to_process.append((file_info['path'], Path(file_info['relativePath'])))
+        elif existing['metadata']['fileSize'] != file_info['size']:
+            # File size changed, re-process
+            logging.info(f"CHANGED (size): {file_info['relativePath']}")
+            delete_thumbnails(existing)
+            files_to_process.append((file_info['path'], Path(file_info['relativePath'])))
+        else:
+            # File unchanged, keep existing entry
+            files_to_keep.append(existing)
+
+    # Find deleted files
+    for file_id, existing in existing_files.items():
+        if file_id not in current_tree:
+            if allow_delete:
+                logging.info(f"DELETED: {existing['relativePath']}")
+                delete_thumbnails(existing)
+                files_deleted.append(existing)
+            else:
+                logging.info(f"MISSING (kept in index): {existing['relativePath']}")
+                files_to_keep.append(existing)
+
+    # Process new/changed files
+    logging.info(f"\nProcessing {len(files_to_process)} new/changed files...")
+    processed_files = []
+
+    for idx, (file_path, relative_path) in enumerate(files_to_process, 1):
+        try:
+            file_data = process_file(file_path, relative_path)
+            if file_data:
+                processed_files.append(file_data)
+
+            if idx % 10 == 0:
+                logging.info(f"Progress: {idx}/{len(files_to_process)} files processed")
+        except Exception as e:
+            logging.error(f"Error processing {file_path}: {e}")
+
+    # Combine kept and newly processed files
+    all_files = files_to_keep + processed_files
+
+    logging.info(f"\nSummary:")
+    logging.info(f"  - Kept unchanged: {len(files_to_keep)}")
+    logging.info(f"  - Newly processed: {len(processed_files)}")
+    logging.info(f"  - Deleted: {len(files_deleted)}")
+    logging.info(f"  - Total: {len(all_files)}")
+
+    return all_files
+
+
 def main():
     """Main execution function."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Media Scanner and Thumbnail Generator')
+    parser.add_argument('--full', action='store_true',
+                        help='Force full scan instead of incremental')
+    parser.add_argument('--allow-delete', action='store_true',
+                        help='Allow removing missing files from index (default: keep missing files)')
+    args = parser.parse_args()
+
+    mode_desc = "FULL SCAN" if args.full else "INCREMENTAL"
+    if not args.allow_delete and not args.full:
+        mode_desc += " (ADD-ONLY)"
+
     logging.info("=" * 60)
     logging.info("Media Scanner and Thumbnail Generator")
+    logging.info("Mode: " + mode_desc)
     logging.info("=" * 60)
 
     # Create output directory
@@ -403,8 +546,17 @@ def main():
     logging.info(f"Output directory: {OUTPUT_DIR / 'public'}")
     logging.info(f"Thumbnails directory: {THUMBNAILS_DIR}")
 
-    # Scan volume
-    files = scan_volume(SOURCE_VOLUME)
+    # Scan volume (incremental by default, full if --full flag is passed)
+    if args.full:
+        logging.info("Performing full scan (--full flag used)...")
+        files = scan_volume_full(SOURCE_VOLUME)
+    else:
+        logging.info("Performing incremental scan...")
+        if not args.allow_delete:
+            logging.info("Delete mode: DISABLED (missing files will be kept in index)")
+        else:
+            logging.info("Delete mode: ENABLED (missing files will be removed from index)")
+        files = scan_volume_incremental(SOURCE_VOLUME, allow_delete=args.allow_delete)
 
     # Calculate statistics
     stats = {
