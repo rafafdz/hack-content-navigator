@@ -8,7 +8,7 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}media_index.json`)
+    fetch(`${import.meta.env.BASE_URL}media_index.json?t=${Date.now()}`)
       .then(response => response.json())
       .then(data => {
         setMediaData(data);
