@@ -42,7 +42,9 @@ function App() {
     // Group by date
     const grouped = filtered.reduce((acc, file) => {
       const date = new Date(file.metadata.creationDate);
-      const dateKey = date.toISOString().split('T')[0]; // YYYY-MM-DD
+      const dateKey = !isNaN(date.getTime())
+        ? date.toISOString().split('T')[0] // YYYY-MM-DD
+        : 'unknown-date'; // Fallback for invalid dates
 
       if (!acc[dateKey]) {
         acc[dateKey] = [];
@@ -51,9 +53,13 @@ function App() {
       return acc;
     }, {});
 
-    // Sort dates descending
+    // Sort dates descending (unknown dates go last)
     return Object.keys(grouped)
-      .sort((a, b) => new Date(b) - new Date(a))
+      .sort((a, b) => {
+        if (a === 'unknown-date') return 1;
+        if (b === 'unknown-date') return -1;
+        return new Date(b) - new Date(a);
+      })
       .reduce((acc, key) => {
         acc[key] = grouped[key];
         return acc;
@@ -189,12 +195,14 @@ function App() {
               {/* Date header */}
               <div className="flex items-center mb-6">
                 <h2 className="text-2xl font-bold text-gray-900">
-                  {new Date(date).toLocaleDateString('en-US', {
-                    weekday: 'long',
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric',
-                  })}
+                  {date === 'unknown-date'
+                    ? 'Unknown Date'
+                    : new Date(date).toLocaleDateString('en-US', {
+                        weekday: 'long',
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric',
+                      })}
                 </h2>
                 <span className="ml-4 text-sm text-gray-500">
                   {files.length} {files.length === 1 ? 'file' : 'files'}
